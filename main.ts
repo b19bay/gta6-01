@@ -12,10 +12,65 @@
 // Outside the grader's container, MAKEFUN_OUTPUT_DIR stands in for /output:
 //   mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts
 
-import { cpSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { cpSync, existsSync, mkdirSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildDossier } from './vendor/makefun-game.ts';
+
+// Authored entry validation: fail before the dossier is written if this
+// repo would breach the scorer's size and count gates. The check
+// is read-only — it only lists directories and stats files under root — and
+// mirrors the caps passed to buildDossier below, plus the 1 MiB ceiling on
+// game/index.html itself. A compliant repo passes silently, so the normal
+// copy-and-dossier flow is unchanged.
+function assertEntryWithinGates(root) {
+  const gameDir = join(root, 'game');
+  const shotsDir = join(root, 'screenshots');
+
+  let entryCount = 0;
+  let totalBytes = 0;
+  const walkGame = (dir) => {
+    for (const name of readdirSync(dir)) {
+      const full = join(dir, name);
+      const rel = relative(gameDir, full);
+      const relBytes = Buffer.byteLength(rel, 'utf8');
+      if (relBytes > 1000) {
+        throw new Error(`entry gate: relative path under game/ is ${relBytes} bytes, over the 1000-byte limit: ${rel}`);
+      }
+      const info = statSync(full);
+      entryCount += 1;
+      if (info.isDirectory()) {
+        walkGame(full);
+      } else if (info.isFile()) {
+        totalBytes += info.size;
+      }
+    }
+  };
+  walkGame(gameDir);
+
+  if (entryCount > 993) {
+    throw new Error(`entry gate: game/ holds ${entryCount} entries (files and directories), over the 993-entry limit`);
+  }
+  if (totalBytes > 50331648) {
+    throw new Error(`entry gate: game/ totals ${totalBytes} bytes, over the 50331648-byte (48 MiB) limit`);
+  }
+
+  const indexSize = statSync(join(gameDir, 'index.html')).size;
+  if (indexSize > 1048576) {
+    throw new Error(`entry gate: game/index.html is ${indexSize} bytes, over the 1048576-byte (1 MiB) limit`);
+  }
+
+  const shotNames = readdirSync(shotsDir).filter((name) => statSync(join(shotsDir, name)).isFile());
+  if (shotNames.length < 3 || shotNames.length > 4) {
+    throw new Error(`entry gate: screenshots/ holds ${shotNames.length} files, outside the required 3-4 range`);
+  }
+  for (const name of shotNames) {
+    const size = statSync(join(shotsDir, name)).size;
+    if (size > 262144) {
+      throw new Error(`entry gate: screenshots/${name} is ${size} bytes, over the 262144-byte (256 KiB) limit`);
+    }
+  }
+}
 
 const here = fileURLToPath(new URL('.', import.meta.url));
 const out = process.env.MAKEFUN_OUTPUT_DIR ?? '/output';
@@ -29,6 +84,7 @@ if (existsSync(join(here, 'screenshots'))) cpSync(join(here, 'screenshots'), joi
 // scorer would refuse (more than 4 screenshots or one over 256 KiB; more than 993 files in game/ or 48 MiB of game
 // files, in all, or a path under game/ over 1000 bytes: game/ counts beside /output's own 1000-entry cap, its
 // screenshots/ and dossier.json).
+assertEntryWithinGates(here);
 writeFileSync(
   join(out, 'dossier.json'),
   buildDossier(out, {
